@@ -1,0 +1,14 @@
+{
+  "name": "smart-plant-watering-backend",
+  "version": "1.0.0",
+  "description": "Cloud backend for the ESP32 smart plant watering system",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^4.19.2"
+  }
+}

@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Smart Plant Watering Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="./config.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">ESP32 + Cloud + Web</p>
+          <h1>Smart Plant Watering System</h1>
+          <p class="hero-copy">
+            Monitor soil, climate, and light conditions, then water the selected
+            plant using a Water Requirement Score instead of one fixed threshold.
+          </p>
+        </div>
+        <div class="hero-badge">
+          <span id="connection-pill" class="status-pill">Waiting for device</span>
+          <p class="muted">Last sync</p>
+          <strong id="last-sync">No data yet</strong>
+        </div>
+      </header>
+
+      <main class="dashboard-grid">
+        <section class="card controls-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Setup</p>
+              <h2>Plant Selection</h2>
+            </div>
+          </div>
+
+          <label for="plant-select" class="field-label">Choose one plant</label>
+          <select id="plant-select"></select>
+
+          <div class="button-row">
+            <button id="save-config-btn" class="primary-btn">Save Plant</button>
+            <button id="manual-water-btn" class="secondary-btn">Manual Watering</button>
+          </div>
+
+          <div class="info-grid compact">
+            <div class="info-box">
+              <span class="info-label">Current plant</span>
+              <strong id="current-plant">-</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Score threshold</span>
+              <strong id="score-threshold">-</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Pump duration</span>
+              <strong id="pump-duration">-</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Cooldown</span>
+              <strong id="cooldown-time">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="card status-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Watering</p>
+              <h2>Pump Status</h2>
+            </div>
+          </div>
+
+          <div class="pump-display">
+            <span id="pump-pill" class="status-pill off">Pump OFF</span>
+            <div>
+              <p class="muted">Last watered</p>
+              <strong id="last-watered">Not watered yet</strong>
+            </div>
+          </div>
+
+          <div class="info-grid compact">
+            <div class="info-box">
+              <span class="info-label">Water score</span>
+              <strong id="water-score">-</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Last reason</span>
+              <strong id="last-reason">-</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Manual request</span>
+              <strong id="manual-request-state">Idle</strong>
+            </div>
+            <div class="info-box">
+              <span class="info-label">Plant profile</span>
+              <strong id="plant-description">-</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="card sensors-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Live Sensors</p>
+              <h2>Current Readings</h2>
+            </div>
+          </div>
+
+          <div class="sensor-grid">
+            <article class="sensor-tile">
+              <span>Soil Moisture</span>
+              <strong id="soil-value">-</strong>
+              <small id="soil-raw">Raw: -</small>
+            </article>
+            <article class="sensor-tile">
+              <span>Temperature</span>
+              <strong id="temperature-value">-</strong>
+              <small>Degree Celsius</small>
+            </article>
+            <article class="sensor-tile">
+              <span>Humidity</span>
+              <strong id="humidity-value">-</strong>
+              <small>Relative humidity</small>
+            </article>
+            <article class="sensor-tile">
+              <span>Light Intensity</span>
+              <strong id="light-value">-</strong>
+              <small id="light-raw">Raw: -</small>
+            </article>
+          </div>
+        </section>
+
+        <section class="card chart-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Historical Trends</p>
+              <h2>Soil Moisture & Water Score</h2>
+            </div>
+          </div>
+          <canvas id="soil-chart"></canvas>
+        </section>
+
+        <section class="card chart-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Historical Trends</p>
+              <h2>Temperature, Humidity & Light</h2>
+            </div>
+          </div>
+          <canvas id="climate-chart"></canvas>
+        </section>
+
+        <section class="card history-card">
+          <div class="section-heading">
+            <div>
+              <p class="eyebrow">Recent Events</p>
+              <h2>Watering Log</h2>
+            </div>
+          </div>
+          <ul id="watering-log-list" class="history-list"></ul>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

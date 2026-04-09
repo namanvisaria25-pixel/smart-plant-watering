@@ -1,0 +1,21 @@
+{
+  "currentPlant": "Money Plant",
+  "sensorData": [],
+  "wateringLogs": [],
+  "pumpStatus": {
+    "isOn": false,
+    "lastChangedAt": null,
+    "lastWateredAt": null,
+    "lastReason": null
+  },
+  "settings": {
+    "cooldownMs": 3600000,
+    "pumpDurationMs": 7000
+  },
+  "manualWaterRequest": {
+    "pending": false,
+    "id": null,
+    "requestedAt": null,
+    "consumedAt": null
+  }
+}

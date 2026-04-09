@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: smart-plant-watering
+    runtime: node
+    plan: free
+    buildCommand: npm install --prefix backend
+    startCommand: node backend/src/server.js
+    healthCheckPath: /health
