@@ -1,4 +1,4 @@
-const fs = require("fs/promises");
+const fs   = require("fs/promises");
 const path = require("path");
 
 const DATA_DIR = process.env.DATA_DIR
@@ -9,32 +9,41 @@ const DB_PATH = process.env.DB_PATH
   ? path.resolve(process.env.DB_PATH)
   : path.join(DATA_DIR, "db.json");
 
+// Default database — includes all new settings fields
 const DEFAULT_DB = {
   currentPlant: "Money Plant",
-  sensorData: [],
+  sensorData:   [],
   wateringLogs: [],
   pumpStatus: {
-    isOn: false,
+    isOn:          false,
     lastChangedAt: null,
     lastWateredAt: null,
-    lastReason: null
+    lastReason:    null
   },
   settings: {
-    cooldownMs: 3600000,
-    pumpDurationMs: 7000
+    // Timing
+    cooldownMs:      3600000,  // 1 hour
+    pumpDurationMs:  7000,     // fallback fixed duration (ms)
+    // Volume-based watering (used by ESP32 + dashboard display)
+    pumpFlowMlPerSec: 20.0,
+    minWaterMl:       15.0,
+    maxWaterMl:       120.0,
+    // Size categories  (sent to ESP32 via GET /config)
+    potSizeCategory:   "medium",
+    plantSizeCategory: "medium"
   },
   manualWaterRequest: {
-    pending: false,
-    id: null,
+    pending:     false,
+    id:          null,
     requestedAt: null,
-    consumedAt: null
+    consumedAt:  null
   }
 };
 
 async function ensureDb() {
   try {
     await fs.access(DB_PATH);
-  } catch (error) {
+  } catch {
     await fs.mkdir(path.dirname(DB_PATH), { recursive: true });
     await fs.writeFile(DB_PATH, JSON.stringify(DEFAULT_DB, null, 2));
   }
@@ -43,7 +52,12 @@ async function ensureDb() {
 async function readDb() {
   await ensureDb();
   const raw = await fs.readFile(DB_PATH, "utf8");
-  return JSON.parse(raw);
+  const db  = JSON.parse(raw);
+
+  // Back-fill any missing settings keys so old db.json files
+  // work after the upgrade without a manual reset.
+  db.settings = { ...DEFAULT_DB.settings, ...db.settings };
+  return db;
 }
 
 async function writeDb(db) {
@@ -51,17 +65,14 @@ async function writeDb(db) {
 }
 
 async function updateDb(updater) {
-  const db = await readDb();
+  const db     = await readDb();
   const nextDb = await updater(db);
   await writeDb(nextDb);
   return nextDb;
 }
 
 function keepRecentItems(items, limit) {
-  if (!Array.isArray(items)) {
-    return [];
-  }
-
+  if (!Array.isArray(items)) return [];
   return items.slice(-limit);
 }
 
