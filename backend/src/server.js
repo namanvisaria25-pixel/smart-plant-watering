@@ -12,12 +12,17 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(dashboardDir));
 
+const VALID_SIZES = ["small", "medium", "large"];
+
+// ─────────────────────────────────────────────
+// PAYLOAD BUILDERS
+// ─────────────────────────────────────────────
 function buildConfigPayload(db) {
   return {
-    currentPlant: db.currentPlant,
-    config: getPlantProfile(db.currentPlant),
-    supportedPlants: getPlantNames(),
-    settings: db.settings,
+    currentPlant:       db.currentPlant,
+    config:             getPlantProfile(db.currentPlant),
+    supportedPlants:    getPlantNames(),
+    settings:           db.settings,
     manualWaterRequest: db.manualWaterRequest
   };
 }
@@ -25,17 +30,16 @@ function buildConfigPayload(db) {
 function buildDashboardState(db) {
   const sensorHistory = keepRecentItems(db.sensorData, 30);
   const wateringLogs  = keepRecentItems(db.wateringLogs, 20);
-
   return {
-    currentPlant:    db.currentPlant,
-    currentConfig:   getPlantProfile(db.currentPlant),
-    supportedPlants: getPlantNames(),
-    latestSensor:    sensorHistory[sensorHistory.length - 1] || null,
+    currentPlant:       db.currentPlant,
+    currentConfig:      getPlantProfile(db.currentPlant),
+    supportedPlants:    getPlantNames(),
+    latestSensor:       sensorHistory[sensorHistory.length - 1] || null,
     sensorHistory,
     wateringLogs,
-    pumpStatus:          db.pumpStatus,
-    settings:            db.settings,
-    manualWaterRequest:  db.manualWaterRequest
+    pumpStatus:         db.pumpStatus,
+    settings:           db.settings,
+    manualWaterRequest: db.manualWaterRequest
   };
 }
 
@@ -43,19 +47,39 @@ function isSupportedPlant(plantType) {
   return getPlantNames().includes(plantType);
 }
 
-// ── Health ────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// HEALTH
+// ─────────────────────────────────────────────
 app.get("/health", (_req, res) => {
   res.json({ ok: true, service: "smart-plant-watering-backend" });
 });
 
-// ── Config (ESP32 reads this) ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// GET /config  — ESP32 polls every 60 s
+// ─────────────────────────────────────────────
 app.get("/config", async (_req, res) => {
   const db = await readDb();
   res.json(buildConfigPayload(db));
 });
 
+// ─────────────────────────────────────────────
+// POST /config  — Dashboard "Save Plant" button
+// Now accepts: plantType, potSizeCategory,
+//   plantSizeCategory, pumpFlowMlPerSec,
+//   minWaterMl, maxWaterMl,
+//   cooldownMs, pumpDurationMs
+// ─────────────────────────────────────────────
 app.post("/config", async (req, res) => {
-  const { plantType, cooldownMs, pumpDurationMs } = req.body;
+  const {
+    plantType,
+    cooldownMs,
+    pumpDurationMs,
+    potSizeCategory,
+    plantSizeCategory,
+    pumpFlowMlPerSec,
+    minWaterMl,
+    maxWaterMl
+  } = req.body;
 
   if (plantType && !isSupportedPlant(plantType)) {
     return res.status(400).json({
@@ -63,14 +87,26 @@ app.post("/config", async (req, res) => {
       supportedPlants: getPlantNames()
     });
   }
+  if (potSizeCategory && !VALID_SIZES.includes(potSizeCategory)) {
+    return res.status(400).json({ error: "potSizeCategory must be small | medium | large" });
+  }
+  if (plantSizeCategory && !VALID_SIZES.includes(plantSizeCategory)) {
+    return res.status(400).json({ error: "plantSizeCategory must be small | medium | large" });
+  }
 
   const db = await updateDb((cur) => {
     const next = { ...cur };
     if (plantType) next.currentPlant = plantType;
+
     next.settings = {
       ...cur.settings,
-      ...(Number.isFinite(cooldownMs)     ? { cooldownMs }     : {}),
-      ...(Number.isFinite(pumpDurationMs) ? { pumpDurationMs } : {})
+      ...(Number.isFinite(cooldownMs)       ? { cooldownMs }       : {}),
+      ...(Number.isFinite(pumpDurationMs)   ? { pumpDurationMs }   : {}),
+      ...(Number.isFinite(pumpFlowMlPerSec) ? { pumpFlowMlPerSec } : {}),
+      ...(Number.isFinite(minWaterMl)       ? { minWaterMl }       : {}),
+      ...(Number.isFinite(maxWaterMl)       ? { maxWaterMl }       : {}),
+      ...(potSizeCategory                   ? { potSizeCategory }   : {}),
+      ...(plantSizeCategory                 ? { plantSizeCategory } : {})
     };
     return next;
   });
@@ -78,7 +114,9 @@ app.post("/config", async (req, res) => {
   return res.json({ message: "Configuration updated", ...buildConfigPayload(db) });
 });
 
-// ── Sensor data (ESP32 posts this) ───────────────────────────────────────────
+// ─────────────────────────────────────────────
+// POST /sensor-data  — ESP32 every 30 s
+// ─────────────────────────────────────────────
 app.post("/sensor-data", async (req, res) => {
   const payload   = req.body || {};
   const timestamp = payload.timestamp || new Date().toISOString();
@@ -94,10 +132,8 @@ app.post("/sensor-data", async (req, res) => {
     lightRaw:              payload.lightRaw              ?? null,
     lightPercent:          payload.lightPercent          ?? null,
     waterRequirementScore: payload.waterRequirementScore ?? null,
-    // ── NEW fields from updated ESP32 firmware ──
     recommendedWaterMl:    payload.recommendedWaterMl    ?? null,
     recommendedDurationMs: payload.recommendedDurationMs ?? null,
-    // ───────────────────────────────────────────
     pumpState:             Boolean(payload.pumpState),
     mode:                  payload.mode || "online",
     timestamp,
@@ -118,7 +154,6 @@ app.post("/sensor-data", async (req, res) => {
         lastChangedAt: pumpStateChanged ? timestamp : cur.pumpStatus.lastChangedAt
       }
     };
-
     if (entry.plantType) next.currentPlant = entry.plantType;
     return next;
   });
@@ -126,14 +161,18 @@ app.post("/sensor-data", async (req, res) => {
   res.status(201).json({ message: "Sensor data stored" });
 });
 
-// ── Sensor history ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// GET /sensor-history
+// ─────────────────────────────────────────────
 app.get("/sensor-history", async (req, res) => {
   const limit = Number.parseInt(req.query.limit, 10) || 30;
   const db    = await readDb();
   res.json(keepRecentItems(db.sensorData, Math.min(limit, 200)));
 });
 
-// ── Watering log (ESP32 posts this) ──────────────────────────────────────────
+// ─────────────────────────────────────────────
+// POST /watering-log  — ESP32 after each pump cycle
+// ─────────────────────────────────────────────
 app.post("/watering-log", async (req, res) => {
   const payload   = req.body || {};
   const timestamp = payload.timestamp || new Date().toISOString();
@@ -144,9 +183,7 @@ app.post("/watering-log", async (req, res) => {
     event,
     reason:     payload.reason    || "automatic",
     durationMs: payload.durationMs ?? 0,
-    // ── NEW field from updated ESP32 firmware ──
     volumeMl:   payload.volumeMl  ?? null,
-    // ──────────────────────────────────────────
     score:      payload.score     ?? null,
     requestId:  payload.requestId || null,
     timestamp,
@@ -165,14 +202,12 @@ app.post("/watering-log", async (req, res) => {
       next.pumpStatus.lastChangedAt = timestamp;
       next.pumpStatus.lastReason    = logEntry.reason;
     }
-
     if (event === "completed") {
-      next.pumpStatus.isOn           = false;
-      next.pumpStatus.lastChangedAt  = timestamp;
-      next.pumpStatus.lastWateredAt  = timestamp;
-      next.pumpStatus.lastReason     = logEntry.reason;
+      next.pumpStatus.isOn          = false;
+      next.pumpStatus.lastChangedAt = timestamp;
+      next.pumpStatus.lastWateredAt = timestamp;
+      next.pumpStatus.lastReason    = logEntry.reason;
     }
-
     if (event === "skipped_cooldown" || event === "failed") {
       next.pumpStatus.isOn          = false;
       next.pumpStatus.lastChangedAt = timestamp;
@@ -190,14 +225,15 @@ app.post("/watering-log", async (req, res) => {
         consumedAt: timestamp
       };
     }
-
     return next;
   });
 
   res.status(201).json({ message: "Watering event stored", pumpStatus: db.pumpStatus });
 });
 
-// ── Manual watering trigger (dashboard posts this) ────────────────────────────
+// ─────────────────────────────────────────────
+// POST /manual-watering  — Dashboard button
+// ─────────────────────────────────────────────
 app.post("/manual-watering", async (_req, res) => {
   const requestId = `manual-${Date.now()}`;
 
@@ -217,22 +253,28 @@ app.post("/manual-watering", async (_req, res) => {
   });
 });
 
-// ── Plant profiles ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// GET /plant-profiles
+// ─────────────────────────────────────────────
 app.get("/plant-profiles", (_req, res) => {
   res.json(PLANT_PROFILES);
 });
 
-// ── Dashboard state ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// GET /dashboard-state  — Dashboard polls every 10 s
+// ─────────────────────────────────────────────
 app.get("/dashboard-state", async (_req, res) => {
   const db = await readDb();
   res.json(buildDashboardState(db));
 });
 
-// ── Serve dashboard ───────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────
+// SPA fallback
+// ─────────────────────────────────────────────
 app.get("/", (_req, res) => {
   res.sendFile(path.join(dashboardDir, "index.html"));
 });
 
 app.listen(PORT, () => {
-  console.log(`Smart Plant Watering backend listening on http://localhost:${PORT}`);
+  console.log(`Smart Plant Watering backend on http://localhost:${PORT}`);
 });
