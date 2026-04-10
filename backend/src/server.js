@@ -24,18 +24,18 @@ function buildConfigPayload(db) {
 
 function buildDashboardState(db) {
   const sensorHistory = keepRecentItems(db.sensorData, 30);
-  const wateringLogs = keepRecentItems(db.wateringLogs, 20);
+  const wateringLogs  = keepRecentItems(db.wateringLogs, 20);
 
   return {
-    currentPlant: db.currentPlant,
-    currentConfig: getPlantProfile(db.currentPlant),
+    currentPlant:    db.currentPlant,
+    currentConfig:   getPlantProfile(db.currentPlant),
     supportedPlants: getPlantNames(),
-    latestSensor: sensorHistory[sensorHistory.length - 1] || null,
+    latestSensor:    sensorHistory[sensorHistory.length - 1] || null,
     sensorHistory,
     wateringLogs,
-    pumpStatus: db.pumpStatus,
-    settings: db.settings,
-    manualWaterRequest: db.manualWaterRequest
+    pumpStatus:          db.pumpStatus,
+    settings:            db.settings,
+    manualWaterRequest:  db.manualWaterRequest
   };
 }
 
@@ -43,191 +43,194 @@ function isSupportedPlant(plantType) {
   return getPlantNames().includes(plantType);
 }
 
-app.get("/health", (_request, response) => {
-  response.json({ ok: true, service: "smart-plant-watering-backend" });
+// ── Health ────────────────────────────────────────────────────────────────────
+app.get("/health", (_req, res) => {
+  res.json({ ok: true, service: "smart-plant-watering-backend" });
 });
 
-app.get("/config", async (_request, response) => {
+// ── Config (ESP32 reads this) ─────────────────────────────────────────────────
+app.get("/config", async (_req, res) => {
   const db = await readDb();
-  response.json(buildConfigPayload(db));
+  res.json(buildConfigPayload(db));
 });
 
-app.post("/config", async (request, response) => {
-  const { plantType, cooldownMs, pumpDurationMs } = request.body;
+app.post("/config", async (req, res) => {
+  const { plantType, cooldownMs, pumpDurationMs } = req.body;
 
   if (plantType && !isSupportedPlant(plantType)) {
-    return response.status(400).json({
+    return res.status(400).json({
       error: "Unsupported plant type",
       supportedPlants: getPlantNames()
     });
   }
 
-  const db = await updateDb((currentDb) => {
-    const nextDb = { ...currentDb };
-
-    if (plantType) {
-      nextDb.currentPlant = plantType;
-    }
-
-    nextDb.settings = {
-      ...currentDb.settings,
-      ...(Number.isFinite(cooldownMs) ? { cooldownMs } : {}),
+  const db = await updateDb((cur) => {
+    const next = { ...cur };
+    if (plantType) next.currentPlant = plantType;
+    next.settings = {
+      ...cur.settings,
+      ...(Number.isFinite(cooldownMs)     ? { cooldownMs }     : {}),
       ...(Number.isFinite(pumpDurationMs) ? { pumpDurationMs } : {})
     };
-
-    return nextDb;
+    return next;
   });
 
-  return response.json({
-    message: "Configuration updated",
-    ...buildConfigPayload(db)
-  });
+  return res.json({ message: "Configuration updated", ...buildConfigPayload(db) });
 });
 
-app.post("/sensor-data", async (request, response) => {
-  const payload = request.body || {};
+// ── Sensor data (ESP32 posts this) ───────────────────────────────────────────
+app.post("/sensor-data", async (req, res) => {
+  const payload   = req.body || {};
   const timestamp = payload.timestamp || new Date().toISOString();
+
   const entry = {
-    deviceId: payload.deviceId || "unknown-device",
-    plantType: isSupportedPlant(payload.plantType) ? payload.plantType : undefined,
-    soilMoistureRaw: payload.soilMoistureRaw ?? null,
-    soilMoisturePercent: payload.soilMoisturePercent ?? null,
-    soilDryness: payload.soilDryness ?? null,
-    temperature: payload.temperature ?? null,
-    humidity: payload.humidity ?? null,
-    lightRaw: payload.lightRaw ?? null,
-    lightPercent: payload.lightPercent ?? null,
+    deviceId:              payload.deviceId              || "unknown-device",
+    plantType:             isSupportedPlant(payload.plantType) ? payload.plantType : undefined,
+    soilMoistureRaw:       payload.soilMoistureRaw       ?? null,
+    soilMoisturePercent:   payload.soilMoisturePercent   ?? null,
+    soilDryness:           payload.soilDryness           ?? null,
+    temperature:           payload.temperature           ?? null,
+    humidity:              payload.humidity              ?? null,
+    lightRaw:              payload.lightRaw              ?? null,
+    lightPercent:          payload.lightPercent          ?? null,
     waterRequirementScore: payload.waterRequirementScore ?? null,
-    pumpState: Boolean(payload.pumpState),
-    mode: payload.mode || "online",
+    // ── NEW fields from updated ESP32 firmware ──
+    recommendedWaterMl:    payload.recommendedWaterMl    ?? null,
+    recommendedDurationMs: payload.recommendedDurationMs ?? null,
+    // ───────────────────────────────────────────
+    pumpState:             Boolean(payload.pumpState),
+    mode:                  payload.mode || "online",
     timestamp,
     serverReceivedAt: new Date().toISOString()
   };
 
-  await updateDb((currentDb) => {
+  await updateDb((cur) => {
     const pumpStateChanged =
       typeof payload.pumpState === "boolean" &&
-      payload.pumpState !== currentDb.pumpStatus.isOn;
+      payload.pumpState !== cur.pumpStatus.isOn;
 
-    const nextDb = {
-      ...currentDb,
-      sensorData: keepRecentItems([...currentDb.sensorData, entry], 500),
+    const next = {
+      ...cur,
+      sensorData: keepRecentItems([...cur.sensorData, entry], 500),
       pumpStatus: {
-        ...currentDb.pumpStatus,
-        isOn: typeof payload.pumpState === "boolean" ? payload.pumpState : currentDb.pumpStatus.isOn,
-        lastChangedAt: pumpStateChanged ? timestamp : currentDb.pumpStatus.lastChangedAt
+        ...cur.pumpStatus,
+        isOn: typeof payload.pumpState === "boolean" ? payload.pumpState : cur.pumpStatus.isOn,
+        lastChangedAt: pumpStateChanged ? timestamp : cur.pumpStatus.lastChangedAt
       }
     };
 
-    if (entry.plantType) {
-      nextDb.currentPlant = entry.plantType;
-    }
-
-    return nextDb;
+    if (entry.plantType) next.currentPlant = entry.plantType;
+    return next;
   });
 
-  response.status(201).json({ message: "Sensor data stored" });
+  res.status(201).json({ message: "Sensor data stored" });
 });
 
-app.get("/sensor-history", async (request, response) => {
-  const limit = Number.parseInt(request.query.limit, 10) || 30;
-  const db = await readDb();
-  response.json(keepRecentItems(db.sensorData, Math.min(limit, 200)));
+// ── Sensor history ────────────────────────────────────────────────────────────
+app.get("/sensor-history", async (req, res) => {
+  const limit = Number.parseInt(req.query.limit, 10) || 30;
+  const db    = await readDb();
+  res.json(keepRecentItems(db.sensorData, Math.min(limit, 200)));
 });
 
-app.post("/watering-log", async (request, response) => {
-  const payload = request.body || {};
+// ── Watering log (ESP32 posts this) ──────────────────────────────────────────
+app.post("/watering-log", async (req, res) => {
+  const payload   = req.body || {};
   const timestamp = payload.timestamp || new Date().toISOString();
-  const event = payload.event || "completed";
+  const event     = payload.event || "completed";
 
   const logEntry = {
-    deviceId: payload.deviceId || "unknown-device",
+    deviceId:   payload.deviceId  || "unknown-device",
     event,
-    reason: payload.reason || "automatic",
+    reason:     payload.reason    || "automatic",
     durationMs: payload.durationMs ?? 0,
-    score: payload.score ?? null,
-    requestId: payload.requestId || null,
+    // ── NEW field from updated ESP32 firmware ──
+    volumeMl:   payload.volumeMl  ?? null,
+    // ──────────────────────────────────────────
+    score:      payload.score     ?? null,
+    requestId:  payload.requestId || null,
     timestamp,
     serverReceivedAt: new Date().toISOString()
   };
 
-  const db = await updateDb((currentDb) => {
-    const nextDb = {
-      ...currentDb,
-      wateringLogs: keepRecentItems([...currentDb.wateringLogs, logEntry], 300),
-      pumpStatus: { ...currentDb.pumpStatus }
+  const db = await updateDb((cur) => {
+    const next = {
+      ...cur,
+      wateringLogs: keepRecentItems([...cur.wateringLogs, logEntry], 300),
+      pumpStatus: { ...cur.pumpStatus }
     };
 
     if (event === "started") {
-      nextDb.pumpStatus.isOn = true;
-      nextDb.pumpStatus.lastChangedAt = timestamp;
-      nextDb.pumpStatus.lastReason = logEntry.reason;
+      next.pumpStatus.isOn          = true;
+      next.pumpStatus.lastChangedAt = timestamp;
+      next.pumpStatus.lastReason    = logEntry.reason;
     }
 
     if (event === "completed") {
-      nextDb.pumpStatus.isOn = false;
-      nextDb.pumpStatus.lastChangedAt = timestamp;
-      nextDb.pumpStatus.lastWateredAt = timestamp;
-      nextDb.pumpStatus.lastReason = logEntry.reason;
+      next.pumpStatus.isOn           = false;
+      next.pumpStatus.lastChangedAt  = timestamp;
+      next.pumpStatus.lastWateredAt  = timestamp;
+      next.pumpStatus.lastReason     = logEntry.reason;
     }
 
     if (event === "skipped_cooldown" || event === "failed") {
-      nextDb.pumpStatus.isOn = false;
-      nextDb.pumpStatus.lastChangedAt = timestamp;
-      nextDb.pumpStatus.lastReason = logEntry.reason;
+      next.pumpStatus.isOn          = false;
+      next.pumpStatus.lastChangedAt = timestamp;
+      next.pumpStatus.lastReason    = logEntry.reason;
     }
 
     if (
       logEntry.requestId &&
-      currentDb.manualWaterRequest.pending &&
-      currentDb.manualWaterRequest.id === logEntry.requestId
+      cur.manualWaterRequest.pending &&
+      cur.manualWaterRequest.id === logEntry.requestId
     ) {
-      nextDb.manualWaterRequest = {
-        ...currentDb.manualWaterRequest,
-        pending: false,
+      next.manualWaterRequest = {
+        ...cur.manualWaterRequest,
+        pending:    false,
         consumedAt: timestamp
       };
     }
 
-    return nextDb;
+    return next;
   });
 
-  response.status(201).json({
-    message: "Watering event stored",
-    pumpStatus: db.pumpStatus
-  });
+  res.status(201).json({ message: "Watering event stored", pumpStatus: db.pumpStatus });
 });
 
-app.post("/manual-watering", async (_request, response) => {
+// ── Manual watering trigger (dashboard posts this) ────────────────────────────
+app.post("/manual-watering", async (_req, res) => {
   const requestId = `manual-${Date.now()}`;
 
-  const db = await updateDb((currentDb) => ({
-    ...currentDb,
+  const db = await updateDb((cur) => ({
+    ...cur,
     manualWaterRequest: {
-      pending: true,
-      id: requestId,
+      pending:     true,
+      id:          requestId,
       requestedAt: new Date().toISOString(),
-      consumedAt: null
+      consumedAt:  null
     }
   }));
 
-  response.status(202).json({
+  res.status(202).json({
     message: "Manual watering request queued",
     manualWaterRequest: db.manualWaterRequest
   });
 });
 
-app.get("/plant-profiles", (_request, response) => {
-  response.json(PLANT_PROFILES);
+// ── Plant profiles ────────────────────────────────────────────────────────────
+app.get("/plant-profiles", (_req, res) => {
+  res.json(PLANT_PROFILES);
 });
 
-app.get("/dashboard-state", async (_request, response) => {
+// ── Dashboard state ───────────────────────────────────────────────────────────
+app.get("/dashboard-state", async (_req, res) => {
   const db = await readDb();
-  response.json(buildDashboardState(db));
+  res.json(buildDashboardState(db));
 });
 
-app.get("/", (_request, response) => {
-  response.sendFile(path.join(dashboardDir, "index.html"));
+// ── Serve dashboard ───────────────────────────────────────────────────────────
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(dashboardDir, "index.html"));
 });
 
 app.listen(PORT, () => {
