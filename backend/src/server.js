@@ -1,9 +1,10 @@
 /**
  * server.js — Smart Plant Watering Backend
- * Fixes:
- *   - Manual watering now works even when detection is OFF
- *   - POST /manual-watering/cancel  → clears stuck pending request
- *   - /command serves manual request regardless of detection flag
+ * CHANGES FROM ORIGINAL:
+ *   1. POST /esp32-log  — ESP32 posts Serial-style logs here, visible on dashboard
+ *   2. GET  /esp32-logs — Dashboard polls this to show live ESP32 activity
+ *   3. Manual watering clears itself properly after ESP32 confirms via watering-log
+ *   (all existing endpoints unchanged)
  */
 
 const express = require("express");
@@ -21,6 +22,19 @@ const dashboardDir = path.join(__dirname, "..", "..", "dashboard");
 app.use(cors());
 app.use(express.json());
 app.use(express.static(dashboardDir));
+
+// ── In-memory ESP32 log ring buffer (last 200 entries) ──
+// We keep this in memory only — no need to persist across restarts
+let esp32Logs = [];
+function addEsp32Log(level, message, source) {
+  esp32Logs.push({
+    ts:      new Date().toISOString(),
+    level:   level || "info",   // info | warn | error | success
+    message: String(message),
+    source:  source || "esp32"
+  });
+  if (esp32Logs.length > 200) esp32Logs = esp32Logs.slice(-200);
+}
 
 const VALID_SIZES = ["small", "medium", "large"];
 
@@ -60,13 +74,10 @@ function decideCommand(db, scored) {
   const pump     = db.pumpStatus;
   const manual   = db.manualWaterRequest;
 
-  // Never run pump if it's already on
   if (pump.isOn) {
     return { command: "IDLE", reason: "pump_already_on", score: scored.score };
   }
 
-  // ── MANUAL REQUEST: bypasses detection gate and cooldown ──
-  // Manual always works whether detection is ON or OFF
   if (manual.pending) {
     const durationMs = settings.pumpDurationMs || 7000;
     return {
@@ -79,12 +90,10 @@ function decideCommand(db, scored) {
     };
   }
 
-  // ── AUTO: detection gate applies ──
   if (!db.detectionActive) {
     return { command: "IDLE", reason: "detection_off", score: scored.score };
   }
 
-  // Cooldown check
   if (pump.lastWateredAt) {
     const elapsed = now - new Date(pump.lastWateredAt).getTime();
     if (elapsed < (settings.cooldownMs || 3600000)) {
@@ -92,7 +101,6 @@ function decideCommand(db, scored) {
     }
   }
 
-  // Score threshold
   if (!scored.thresholdMet) {
     return { command: "IDLE", reason: "score_below_threshold", score: scored.score };
   }
@@ -114,6 +122,22 @@ function decideCommand(db, scored) {
 // ── Health / ping ──
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/ping",   (_req, res) => res.send("pong"));
+
+// ────────────────────────────────────────────────────────
+// NEW: POST /esp32-log  — ESP32 sends log lines here
+// Body: { level: "info"|"warn"|"error"|"success", message: "..." }
+// ────────────────────────────────────────────────────────
+app.post("/esp32-log", (req, res) => {
+  const { level, message } = req.body || {};
+  if (!message) return res.status(400).json({ error: "message required" });
+  addEsp32Log(level, message, "esp32");
+  res.json({ ok: true });
+});
+
+// NEW: GET /esp32-logs — dashboard fetches these
+app.get("/esp32-logs", (_req, res) => {
+  res.json({ logs: esp32Logs.slice(-100) });
+});
 
 // ── GET /config ──
 app.get("/config", async (_req, res) => {
@@ -160,6 +184,7 @@ app.post("/detection", async (req, res) => {
     return res.status(400).json({ error: "body must be { active: true | false }" });
   }
   const db = await updateDb((cur) => ({ ...cur, detectionActive: active }));
+  addEsp32Log("info", `Detection set to ${active} via dashboard`, "backend");
   res.json({ detectionActive: db.detectionActive });
 });
 
@@ -192,6 +217,13 @@ app.post("/sensor-data", async (req, res) => {
     serverReceivedAt:      new Date().toISOString()
   };
 
+  // Auto-log sensor posts so dashboard shows ESP32 activity
+  addEsp32Log(
+    "info",
+    `Sensor data received — soil=${scored.moisturePercent}% temp=${payload.temperature}°C hum=${payload.humidity}% light=${scored.lightPercent}% score=${scored.score}`,
+    "esp32"
+  );
+
   const db = await updateDb((cur) => {
     const pumpStateChanged =
       typeof payload.pumpState === "boolean" &&
@@ -217,10 +249,10 @@ app.post("/sensor-data", async (req, res) => {
 app.get("/command", async (_req, res) => {
   const db = await readDb();
 
-  // Always check for a pending manual request first (even if no sensor data)
   if (db.manualWaterRequest?.pending) {
     const settings   = db.settings;
     const durationMs = settings.pumpDurationMs || 7000;
+    addEsp32Log("success", `Command sent to ESP32: WATER (manual) for ${durationMs}ms`, "backend");
     return res.json({
       command:    "WATER",
       durationMs,
@@ -243,6 +275,10 @@ app.get("/command", async (_req, res) => {
   const latest   = db.sensorData[db.sensorData.length - 1];
   const scored   = calculateWaterScore(latest, db.currentPlant);
   const decision = decideCommand(db, scored);
+
+  if (decision.command === "WATER") {
+    addEsp32Log("success", `Command sent to ESP32: WATER (auto_score) for ${decision.durationMs}ms`, "backend");
+  }
 
   res.json({
     command:         decision.command,
@@ -281,6 +317,13 @@ app.post("/watering-log", async (req, res) => {
     serverReceivedAt: new Date().toISOString()
   };
 
+  // Log watering events so they show on the dashboard ESP32 panel
+  addEsp32Log(
+    event === "completed" ? "success" : event === "started" ? "info" : "warn",
+    `Pump ${event} — reason=${logEntry.reason} duration=${logEntry.durationMs}ms volume=${logEntry.volumeMl ?? "?"}ml`,
+    "esp32"
+  );
+
   const db = await updateDb((cur) => {
     const next = {
       ...cur,
@@ -291,7 +334,6 @@ app.post("/watering-log", async (req, res) => {
     if (event === "completed") { next.pumpStatus.isOn = false; next.pumpStatus.lastChangedAt = timestamp; next.pumpStatus.lastWateredAt = timestamp; next.pumpStatus.lastReason = logEntry.reason; }
     if (event === "skipped_cooldown" || event === "failed") { next.pumpStatus.isOn = false; next.pumpStatus.lastChangedAt = timestamp; next.pumpStatus.lastReason = logEntry.reason; }
 
-    // Consume manual request when ESP32 confirms it acted on it
     if (
       logEntry.requestId &&
       cur.manualWaterRequest?.pending &&
@@ -308,6 +350,7 @@ app.post("/watering-log", async (req, res) => {
 // ── POST /manual-watering ──
 app.post("/manual-watering", async (_req, res) => {
   const requestId = `manual-${Date.now()}`;
+  addEsp32Log("info", `Manual watering queued — requestId=${requestId}`, "backend");
   const db = await updateDb((cur) => ({
     ...cur,
     manualWaterRequest: {
@@ -320,9 +363,9 @@ app.post("/manual-watering", async (_req, res) => {
   res.status(202).json({ message: "Manual watering request queued", manualWaterRequest: db.manualWaterRequest });
 });
 
-// ── POST /manual-watering/cancel  ← NEW ──
-// Clears a stuck pending manual request so the button un-greys
+// ── POST /manual-watering/cancel ──
 app.post("/manual-watering/cancel", async (_req, res) => {
+  addEsp32Log("warn", "Manual watering request cancelled via dashboard", "backend");
   const db = await updateDb((cur) => ({
     ...cur,
     manualWaterRequest: {
@@ -335,11 +378,9 @@ app.post("/manual-watering/cancel", async (_req, res) => {
   res.json({ message: "Manual watering request cancelled", manualWaterRequest: db.manualWaterRequest });
 });
 
-// ── GET /plant-profiles ──
-
-// ── POST /clear-data  ← NEW ──
-// Wipes sensorData, wateringLogs, pumpStatus back to defaults
+// ── POST /clear-data ──
 app.post("/clear-data", async (_req, res) => {
+  addEsp32Log("warn", "All data cleared via dashboard", "backend");
   const db = await updateDb((cur) => ({
     ...cur,
     sensorData:   [],
@@ -369,4 +410,7 @@ app.get("/dashboard-state", async (_req, res) => {
 });
 
 app.get("/", (_req, res) => res.sendFile(path.join(dashboardDir, "index.html")));
-app.listen(PORT, () => console.log(`Smart Plant Watering backend → http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Smart Plant Watering backend → http://localhost:${PORT}`);
+  addEsp32Log("info", `Backend started on port ${PORT}`, "backend");
+});
