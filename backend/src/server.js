@@ -336,6 +336,30 @@ app.post("/manual-watering/cancel", async (_req, res) => {
 });
 
 // ── GET /plant-profiles ──
+
+// ── POST /clear-data  ← NEW ──
+// Wipes sensorData, wateringLogs, pumpStatus back to defaults
+app.post("/clear-data", async (_req, res) => {
+  const db = await updateDb((cur) => ({
+    ...cur,
+    sensorData:   [],
+    wateringLogs: [],
+    pumpStatus: {
+      isOn:          false,
+      lastChangedAt: null,
+      lastWateredAt: null,
+      lastReason:    null
+    },
+    manualWaterRequest: {
+      pending:     false,
+      id:          null,
+      requestedAt: null,
+      consumedAt:  null
+    }
+  }));
+  res.json({ message: "Data cleared", pumpStatus: db.pumpStatus });
+});
+
 app.get("/plant-profiles", (_req, res) => res.json(PLANT_PROFILES));
 
 // ── GET /dashboard-state ──
