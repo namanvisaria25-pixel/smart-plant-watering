@@ -4,6 +4,8 @@
  *   1. POST /esp32-log  — ESP32 posts Serial-style logs here, visible on dashboard
  *   2. GET  /esp32-logs — Dashboard polls this to show live ESP32 activity
  *   3. Manual watering clears itself properly after ESP32 confirms via watering-log
+ *   4. FIX: Manual watering now uses plant-profile duration (baseWaterMl / pumpFlowMlPerSec)
+ *           instead of the hardcoded pumpDurationMs fallback (was always 7 s for every plant)
  *   (all existing endpoints unchanged)
  */
 
@@ -24,12 +26,11 @@ app.use(express.json());
 app.use(express.static(dashboardDir));
 
 // ── In-memory ESP32 log ring buffer (last 200 entries) ──
-// We keep this in memory only — no need to persist across restarts
 let esp32Logs = [];
 function addEsp32Log(level, message, source) {
   esp32Logs.push({
     ts:      new Date().toISOString(),
-    level:   level || "info",   // info | warn | error | success
+    level:   level || "info",
     message: String(message),
     source:  source || "esp32"
   });
@@ -68,6 +69,24 @@ function buildDashboardState(db) {
   };
 }
 
+/**
+ * Calculate the correct manual-watering duration for the current plant.
+ * Uses profile.baseWaterMl clamped to [minWaterMl, maxWaterMl] divided by
+ * pumpFlowMlPerSec. This is the same formula the auto-score path uses.
+ */
+function manualWaterDuration(settings, plantName) {
+  const profile  = getPlantProfile(plantName);
+  const pumpFlow = settings.pumpFlowMlPerSec || 20;
+  const waterMl  = Math.max(
+    settings.minWaterMl  || 15,
+    Math.min(settings.maxWaterMl || 120, profile.baseWaterMl || 40)
+  );
+  return {
+    durationMs: Math.round((waterMl / pumpFlow) * 1000),
+    volumeMl:   Math.round(waterMl * 10) / 10
+  };
+}
+
 function decideCommand(db, scored) {
   const now      = Date.now();
   const settings = db.settings;
@@ -78,15 +97,16 @@ function decideCommand(db, scored) {
     return { command: "IDLE", reason: "pump_already_on", score: scored.score };
   }
 
+  // FIX: use plant-profile-based duration instead of hardcoded pumpDurationMs
   if (manual.pending) {
-    const durationMs = settings.pumpDurationMs || 7000;
+    const { durationMs, volumeMl } = manualWaterDuration(settings, db.currentPlant);
     return {
-      command:    "WATER",
+      command:   "WATER",
       durationMs,
-      volumeMl:   Math.round((durationMs / 1000) * (settings.pumpFlowMlPerSec || 20)),
-      reason:     "manual",
-      requestId:  manual.id,
-      score:      scored.score
+      volumeMl,
+      reason:    "manual",
+      requestId: manual.id,
+      score:     scored.score
     };
   }
 
@@ -123,10 +143,7 @@ function decideCommand(db, scored) {
 app.get("/health", (_req, res) => res.json({ ok: true }));
 app.get("/ping",   (_req, res) => res.send("pong"));
 
-// ────────────────────────────────────────────────────────
-// NEW: POST /esp32-log  — ESP32 sends log lines here
-// Body: { level: "info"|"warn"|"error"|"success", message: "..." }
-// ────────────────────────────────────────────────────────
+// ── POST /esp32-log ──
 app.post("/esp32-log", (req, res) => {
   const { level, message } = req.body || {};
   if (!message) return res.status(400).json({ error: "message required" });
@@ -134,7 +151,7 @@ app.post("/esp32-log", (req, res) => {
   res.json({ ok: true });
 });
 
-// NEW: GET /esp32-logs — dashboard fetches these
+// ── GET /esp32-logs ──
 app.get("/esp32-logs", (_req, res) => {
   res.json({ logs: esp32Logs.slice(-100) });
 });
@@ -217,7 +234,6 @@ app.post("/sensor-data", async (req, res) => {
     serverReceivedAt:      new Date().toISOString()
   };
 
-  // Auto-log sensor posts so dashboard shows ESP32 activity
   addEsp32Log(
     "info",
     `Sensor data received — soil=${scored.moisturePercent}% temp=${payload.temperature}°C hum=${payload.humidity}% light=${scored.lightPercent}% score=${scored.score}`,
@@ -249,17 +265,17 @@ app.post("/sensor-data", async (req, res) => {
 app.get("/command", async (_req, res) => {
   const db = await readDb();
 
+  // FIX: use plant-profile-based duration instead of hardcoded pumpDurationMs
   if (db.manualWaterRequest?.pending) {
-    const settings   = db.settings;
-    const durationMs = settings.pumpDurationMs || 7000;
-    addEsp32Log("success", `Command sent to ESP32: WATER (manual) for ${durationMs}ms`, "backend");
+    const { durationMs, volumeMl } = manualWaterDuration(db.settings, db.currentPlant);
+    addEsp32Log("success", `Command sent to ESP32: WATER (manual) for ${durationMs}ms (${volumeMl}ml) — plant: ${db.currentPlant}`, "backend");
     return res.json({
-      command:    "WATER",
+      command:         "WATER",
       durationMs,
-      volumeMl:   Math.round((durationMs / 1000) * (settings.pumpFlowMlPerSec || 20)),
-      reason:     "manual",
-      requestId:  db.manualWaterRequest.id,
-      score:      0,
+      volumeMl,
+      reason:          "manual",
+      requestId:       db.manualWaterRequest.id,
+      score:           0,
       detectionActive: db.detectionActive ?? false
     });
   }
@@ -317,7 +333,6 @@ app.post("/watering-log", async (req, res) => {
     serverReceivedAt: new Date().toISOString()
   };
 
-  // Log watering events so they show on the dashboard ESP32 panel
   addEsp32Log(
     event === "completed" ? "success" : event === "started" ? "info" : "warn",
     `Pump ${event} — reason=${logEntry.reason} duration=${logEntry.durationMs}ms volume=${logEntry.volumeMl ?? "?"}ml`,
